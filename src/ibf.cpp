@@ -23,6 +23,7 @@
 #include <seqan3/std/ranges>
 #include <seqan3/range/container/concatenated_sequences.hpp>
 #include <seqan3/range/container/dynamic_bitset.hpp>
+#include <seqan3/range/views/chunk.hpp>
 #include <seqan3/range/views/take_until.hpp>
 
 #include "ibf.h"
@@ -43,26 +44,26 @@ void get_include_set_table(arguments const & args, std::filesystem::path const i
     }
 }
 
-// Fill hash table with minimisers with cutoff.
-void fill_hash_table(arguments const & args,
-                     seqan3::sequence_file_input<my_traits,  seqan3::fields<seqan3::field::seq>> & fin,
-                     robin_hood::unordered_node_map<uint64_t, uint16_t> & hash_table,
-                     robin_hood::unordered_set<uint64_t> const & genome_set_table,
-                     bool const only_genome = false, uint8_t cutoff = 0)
+void fill_hash_table_helper(arguments const & args, robin_hood::unordered_node_map<uint64_t, uint16_t> & hash_table,
+                            robin_hood::unordered_node_map<uint64_t, uint8_t> & cutoff_table,
+                            ranges::range_reference_t<ranges::chunk_view_<ranges::ref_view<std::vector<std::vector<seqan3::dna4> > >, true> > const & sequences,
+                            robin_hood::unordered_set<uint64_t> const & genome_set_table,
+                            bool const only_genome = false, uint8_t cutoff = 0)
 {
-    // Create a smaller cutoff table to save RAM, this cutoff table is only used for constructing the hash table
-    // and afterwards discarded.
-    robin_hood::unordered_node_map<uint64_t, uint8_t>  cutoff_table;
-    for (auto & [seq] : fin)
+    for (auto & seq : sequences)
     {
         for (auto && minHash : seqan3::views::minimiser_hash(seq, args.shape, args.w_size, args.s))
         {
             if ((only_genome & (genome_set_table.contains(minHash))) | (!only_genome))
             {
+                //hash_table[minHash] = std::min<uint16_t>(65534u, hash_table[minHash] + 1);
+
+                auto it = hash_table.find(minHash);
                 // If minHash is already in hash table, increase count in hash table
-                if (hash_table.contains(minHash))
+                if (it != hash_table.end())
                 {
-                    hash_table[minHash] = std::min<uint16_t>(65534u, hash_table[minHash] + 1);
+                    //uint16_t tmp_value = std::min<uint16_t>(65534u, hash_table[minHash] + 1);
+                    it->second = std::min<uint16_t>(65534u, it->second + 1);
                 }
                 // If minHash equals now the cutoff than add it to the hash table and add plus one for the current
                 // iteration.
@@ -74,10 +75,63 @@ void fill_hash_table(arguments const & args,
                 // If none of the above, increase count in cutoff table.
                 else
                 {
-                    cutoff_table[minHash] = std::min<uint8_t>(254u, cutoff_table[minHash] + 1);
+                    cutoff_table[minHash]++;
                 }
             }
         }
+    }
+}
+
+// Fill hash table with minimisers with cutoff.
+void fill_hash_table(arguments const & args,
+                     seqan3::sequence_file_input<my_traits,  seqan3::fields<seqan3::field::seq>> & fin,
+                     robin_hood::unordered_node_map<uint64_t, uint16_t> & hash_table,
+                     robin_hood::unordered_set<uint64_t> const & genome_set_table,
+                     bool const only_genome = false, uint8_t cutoff = 0)
+{
+    omp_set_num_threads(args.threads);
+    std::vector<seqan3::dna4_vector> sequences{};
+    // Create a smaller cutoff table to save RAM, this cutoff table is only used for constructing the hash table
+    // and afterwards discarded.
+    robin_hood::unordered_node_map<uint64_t, uint8_t>  cutoff_table;
+
+    for (auto & [seq] : fin)
+    {
+        if (seq.size() >= args.w_size.get())
+            sequences.push_back(seq);
+    }
+
+    // If multiple threads are used, chunk sequences and fill multiple hash tables with the minimisers
+    auto chunked_seqs = sequences | ranges::views::chunk(static_cast<uint32_t>((sequences.size()*1.0/args.threads)+0.5));
+    std::vector<robin_hood::unordered_node_map<uint64_t, uint16_t>> chunked_hash_tables{};
+    std::vector<robin_hood::unordered_node_map<uint64_t, uint8_t>> chunked_cutoff_hash_tables{};
+    robin_hood::unordered_node_map<uint64_t, uint16_t> dummy{};
+    robin_hood::unordered_node_map<uint64_t, uint8_t> dummy2{};
+    for (int i = 0; i <args.threads; i++)
+    {
+        chunked_hash_tables.push_back(dummy);
+        chunked_cutoff_hash_tables.push_back(dummy2);
+    }
+    #pragma omp parallel for
+    for (int i = 0; i <args.threads; i++)
+    {
+        fill_hash_table_helper(args, chunked_hash_tables[i], chunked_cutoff_hash_tables[i], chunked_seqs[i], genome_set_table, only_genome, cutoff);
+    }
+    sequences.clear();
+
+    // Go over all hash tables and add the minimisers to the final hash table
+    for(int i = 0; i <args.threads; i++)
+    {
+        for (auto && minHash : chunked_hash_tables[i])
+            hash_table[minHash.first] = std::min<uint16_t>(65534u, hash_table[minHash.first] + minHash.second);
+        chunked_hash_tables[i].clear();
+    }
+
+    // Go over all minimisers and add the numbers from the chunked_cutoff
+    for (auto && minHash : hash_table)
+    {
+        for(int i = 0; i <args.threads; i++)
+            hash_table[minHash.first] = std::min<uint16_t>(65534u, chunked_cutoff_hash_tables[i][minHash.first] + minHash.second);
     }
 }
 
@@ -555,14 +609,6 @@ void minimiser(std::vector<std::filesystem::path> const & sequence_files, argume
     if (minimiser_args.include_file != "")
         get_include_set_table(args, minimiser_args.include_file, genome_set_table);
 
-    omp_set_num_threads(args.threads);
-
-    size_t const chunk_size = std::clamp<size_t>(std::bit_ceil(minimiser_args.samples.size() / args.threads),
-                                                 1u,
-                                                 64u);
-
-    // Add minimisers to ibf
-    #pragma omp parallel for schedule(dynamic, chunk_size)
     for(unsigned i = 0; i < minimiser_args.samples.size(); i++)
     {
         calculate_minimiser(sequence_files, genome_set_table, args, minimiser_args, i);
