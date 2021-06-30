@@ -51,30 +51,52 @@ void fill_hash_table(arguments const & args,
                      robin_hood::unordered_set<uint64_t> const & genome_set_table,
                      bool const only_genome = false, uint8_t cutoff = 0)
 {
+    std::vector<std::vector<seqan3::dna4>> sequences{};
     for (auto & [seq] : fin)
+        sequences.push_back(seq);
+
+    size_t const chunk_size = sequences.size()/(4*args.threads);
+    std::vector<robin_hood::unordered_node_map<uint64_t, uint16_t>> mini_hash_tables{};
+    robin_hood::unordered_node_map<uint64_t, uint16_t> empty_table{};
+    for(int i = 0; i < (4*args.threads) + 1; i++)
+        mini_hash_tables.push_back(empty_table);
+
+    omp_set_num_threads(args.threads);
+
+    #pragma omp parallel for
+    for(int j = 0; j < mini_hash_tables.size(); j++)
     {
-        for (auto && minHash : seqan3::views::minimiser_hash(seq, args.shape, args.w_size, args.s))
+        for(int i = j*chunk_size; i < std::min((j+1)*chunk_size, sequences.size()); i++)
         {
-            if ((only_genome & (genome_set_table.contains(minHash))) | (!only_genome))
+            for (auto && minHash : seqan3::views::minimiser_hash(sequences[i], args.shape, args.w_size, args.s))
             {
-                auto it = hash_table.find(minHash);
-                // If minHash is already in hash table, increase count in hash table
-                if (it != hash_table.end())
+                if ((only_genome & (genome_set_table.contains(minHash))) | (!only_genome))
                 {
-                    it->second = std::min<uint16_t>(65534u, hash_table[minHash] + 1);
+                    mini_hash_tables[j][minHash]++;
                 }
-                // If minHash equals now the cutoff than add it to the hash table and add plus one for the current
-                // iteration.
-                else if (cutoff_table[minHash] == cutoff)
-                {
-                    hash_table[minHash] = cutoff_table[minHash] + 1;
-                    cutoff_table.erase(minHash);
-                }
-                // If none of the above, increase count in cutoff table.
-                else
-                {
-                    cutoff_table[minHash]++;
-                }
+            }
+        }
+
+        #pragma omp critical
+        for(auto && minHash : mini_hash_tables[j])
+        {
+            auto it = hash_table.find(minHash.first);
+            // If minHash is already in hash table, increase count in hash table
+            if (it != hash_table.end())
+            {
+                it->second = std::min<uint16_t>(65535u, hash_table[minHash.first] + minHash.second);
+            }
+            // If minHash equals now the cutoff than add it to the hash table and add plus one for the current
+            // iteration.
+            else if ((cutoff_table[minHash.first] + minHash.second) > cutoff)
+            {
+                hash_table[minHash.first] = cutoff_table[minHash.first] + minHash.second;
+                cutoff_table.erase(minHash.first);
+            }
+            // If none of the above, increase count in cutoff table.
+            else
+            {
+                cutoff_table[minHash.first]++;
             }
         }
     }
@@ -346,11 +368,8 @@ void ibf_helper(std::vector<std::filesystem::path> const & minimiser_files, argu
 
     omp_set_num_threads(args.threads);
 
-    size_t const chunk_size = std::clamp<size_t>(std::bit_ceil(num_files / args.threads),
-                                                 8u,
-                                                 64u);
     // Get expression levels and sizes
-    #pragma omp parallel for schedule(dynamic, chunk_size)
+    #pragma omp parallel for
     for (unsigned i = 0; i < num_files; i++)
     {
         uint64_t filesize{}; // Store filesize(minimiser_files_given=false) or number of minimisers(minimiser_files_given=true)
@@ -411,7 +430,6 @@ void ibf_helper(std::vector<std::filesystem::path> const & minimiser_files, argu
     }
 
     // Add minimisers to ibf
-    #pragma omp parallel for schedule(dynamic, chunk_size)
     for (unsigned i = 0; i < num_files; i++)
     {
         robin_hood::unordered_node_map<uint64_t, uint16_t> hash_table{}; // Storage for minimisers
@@ -649,14 +667,7 @@ void minimiser(std::vector<std::filesystem::path> const & sequence_files, argume
     if (minimiser_args.include_file != "")
         get_include_set_table(args, minimiser_args.include_file, genome_set_table);
 
-    omp_set_num_threads(args.threads);
-
-    size_t const chunk_size = std::clamp<size_t>(std::bit_ceil(minimiser_args.samples.size() / args.threads),
-                                                 1u,
-                                                 64u);
-
     // Add minimisers to ibf
-    #pragma omp parallel for schedule(dynamic, chunk_size)
     for(unsigned i = 0; i < minimiser_args.samples.size(); i++)
     {
         calculate_minimiser(sequence_files, genome_set_table, args, minimiser_args, i);
