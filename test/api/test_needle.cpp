@@ -700,12 +700,13 @@ TEST(estimate, small_example_gene_not_found)
     std::filesystem::remove(tmp_dir/"expression.out");
 }
 
-TEST(estimate, small_example_different_expressions_per_level)
+TEST(estimate, small_example_different_expressions_per_level_normalization_1)
 {
     arguments args{};
     ibf_arguments ibf_args{};
     minimiser_arguments minimiser_args{};
     estimate_arguments estimate_args{};
+    estimate_args.normalization_method = 1;
     initialization_args(args);
     initialization_ibf_args(ibf_args);
     ibf_args.number_expression_levels = 3;
@@ -722,7 +723,7 @@ TEST(estimate, small_example_different_expressions_per_level)
 
     std::ifstream output_file(tmp_dir/"expression.out");
     std::string line;
-    std::string expected{"gen1\t3\t"};
+    std::string expected{"gen1\t1\t"};
     if (output_file.is_open())
     {
         while ( std::getline (output_file,line) )
@@ -737,6 +738,46 @@ TEST(estimate, small_example_different_expressions_per_level)
     std::filesystem::remove(tmp_dir/"Test_IBF_Levels.levels");
     std::filesystem::remove(tmp_dir/"expression.out");
 }
+
+TEST(estimate, small_example_different_expressions_per_level_normalization_2)
+{
+    arguments args{};
+    ibf_arguments ibf_args{};
+    minimiser_arguments minimiser_args{};
+    estimate_arguments estimate_args{};
+    estimate_args.normalization_method = 2;
+    initialization_args(args);
+    initialization_ibf_args(ibf_args);
+    ibf_args.number_expression_levels = 3;
+    std::vector<std::filesystem::path> sequence_files = {std::string(DATA_INPUT_DIR) + "mini_example.fasta"};
+
+    minimiser(sequence_files, args, minimiser_args);
+    std::vector<std::filesystem::path> minimiser_files{tmp_dir/"Test_mini_example.minimiser", tmp_dir/"Test_mini_example.minimiser"};
+    ibf_args.expression_levels = {};
+    ibf(minimiser_files, args, ibf_args);
+
+    estimate_args.expressions = {0, 1, 2};
+    estimate_args.fpr = ibf_args.fpr;
+    call_estimate(args, estimate_args, tmp_dir/"expression.out", std::string(DATA_INPUT_DIR) + "mini_gen.fasta", args.path_out, tmp_dir/"Test_IBF_Levels.levels");
+
+    std::ifstream output_file(tmp_dir/"expression.out");
+    std::string line;
+    std::string expected{"gen1\t3\t3\t"};
+    if (output_file.is_open())
+    {
+        while ( std::getline (output_file,line) )
+        {
+            EXPECT_EQ(expected,line);
+        }
+        output_file.close();
+    }
+    std::filesystem::remove(tmp_dir/"Test_IBF_Level_0");
+    std::filesystem::remove(tmp_dir/"Test_IBF_Level_1");
+    std::filesystem::remove(tmp_dir/"Test_IBF_Level_2");
+    std::filesystem::remove(tmp_dir/"Test_IBF_Levels.levels");
+    std::filesystem::remove(tmp_dir/"expression.out");
+}
+
 
 TEST(estimate, example)
 {
