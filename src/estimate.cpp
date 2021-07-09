@@ -111,6 +111,44 @@ void read_levels(std::vector<std::vector<uint16_t>> & expressions, std::filesyst
     fin.close();
 }
 
+// Reads the level file ibf creates and take average
+void avg_exp_levels(std::vector<uint16_t> & expressions, std::filesystem::path filename, uint64_t & prev_expression)
+{
+    std::ifstream fin;
+    fin.open(filename);
+    auto stream_view = seqan3::views::istreambuf(fin);
+    auto stream_it = std::ranges::begin(stream_view);
+    std::vector<uint16_t> empty_vector{};
+
+    std::string buffer{};
+    uint64_t num_elems{0};
+    expressions.clear();
+
+    // Read line = expression levels
+    do
+    {
+        std::ranges::copy(stream_view | seqan3::views::take_until_or_throw(seqan3::is_char<' '>),
+                                        std::cpp20::back_inserter(buffer));
+        empty_vector.push_back((uint16_t)  std::stoi(buffer));
+        buffer.clear();
+        num_elems++;
+        if(*stream_it != '/')
+            ++stream_it;
+
+        if (*stream_it == '\n')
+        {
+            ++stream_it;
+            expressions.push_back(std::accumulate(empty_vector.begin(), empty_vector.end(), 0)/num_elems);
+            empty_vector.clear();
+            num_elems = 0;
+        }
+    } while (*stream_it != '/');
+    ++stream_it;
+
+    fin.close();
+    prev_expression = 0;
+}
+
 /*! \brief Function to estimate expression value.
 *  \param args        The arguments.
 *  \param estimate_args The search arguments.
@@ -142,7 +180,9 @@ void estimate(arguments const & args, estimate_arguments & estimate_args, IBFTyp
         seqs.push_back(seq);
     }
 
-    if constexpr (samplewise)
+    if constexpr (normalization_method == 2)
+        avg_exp_levels(estimate_args.expressions, level_file, prev_expression);
+    else if constexpr (samplewise)
         read_levels(expressions, level_file);
     else
         prev_expression = 0;
@@ -151,7 +191,7 @@ void estimate(arguments const & args, estimate_arguments & estimate_args, IBFTyp
     sort(estimate_args.expressions.begin(), estimate_args.expressions.end());
 
     // Initialse last expression
-    if constexpr (samplewise)
+    if constexpr (samplewise || (normalization_method == 2))
         load_ibf(ibf, path_in.string() + "IBF_Level_" + std::to_string(estimate_args.expressions.size()-1));
     else
         load_ibf(ibf, path_in.string() + "IBF_" + std::to_string(estimate_args.expressions[estimate_args.expressions.size()-1]));
@@ -186,7 +226,7 @@ void estimate(arguments const & args, estimate_arguments & estimate_args, IBFTyp
 
     for (int j = estimate_args.expressions.size() - 2; j >= 0; j--)
     {
-        if constexpr (samplewise)
+        if constexpr (samplewise || (normalization_method == 2))
             load_ibf(ibf, path_in.string() + "IBF_Level_" + std::to_string(j));
         else
             load_ibf(ibf, path_in.string() + "IBF_" + std::to_string(estimate_args.expressions[j]));
@@ -243,6 +283,8 @@ void call_estimate(arguments const & args, estimate_arguments & estimate_args, s
         {
             if (estimate_args.normalization_method == 1)
                 estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::compressed>, true, 1>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
+            else if (estimate_args.normalization_method == 2)
+                estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::compressed>, false, 2>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
             else
                 estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::compressed>, true>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
         }
@@ -258,6 +300,8 @@ void call_estimate(arguments const & args, estimate_arguments & estimate_args, s
         {
             if (estimate_args.normalization_method == 1)
                 estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::uncompressed>, true, 1>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
+            if (estimate_args.normalization_method == 2)
+                estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::uncompressed>, false, 2>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
             else
                 estimate<seqan3::interleaved_bloom_filter<seqan3::data_layout::uncompressed>, true>(args, estimate_args, ibf, file_out, search_file, path_in, level_file);
         }
